@@ -5,26 +5,34 @@ org 07C00h
 jmp setup_game
 
 ;; CONSTANTS -----------------
-VIDMEM          equ 0B800h                          ; color text mode VGA memory location
-ROWLEN          equ 160                             ; 80 character row * 2 bytes each
-PLAYERX         equ 4
-CPUX            equ 154                             ; Keyboard scancodes
-KEY_W           equ 11h
-KEY_S           equ 1Fh
-KEY_C           equ 2Eh
-KEY_R           equ 13h
-SCREENW         equ 80
-SCREENH         equ 25
-PADDLEHEIGHT    equ 5
+VIDMEM              equ 0B800h                          ; color text mode VGA memory location
+ROWLEN              equ 160                             ; 80 character row * 2 bytes each
+PLAYERX             equ 4
+CPUX                equ 154                             ; Keyboard scancodes
+KEY_W               equ 11h
+KEY_S               equ 1Fh
+KEY_C               equ 2Eh
+KEY_R               equ 13h
+SCREENW             equ 80
+SCREENH             equ 25
+PADDLEHEIGHT        equ 5
+PLAYERBALLSTARTX    equ 66
+CPUBALLSTARTX       equ 90
+BALLSTARTY          equ 7
+WINCOND             equ 3
 
 ;; Variables -----------------
-drawColor:  db 0F0h
-playerY:    dw 10
-cpuY:       dw 10
-ballX:      dw 66
-ballY:      dw 7
-ballVelX:   db -1
-ballVelY:   db 1
+drawColor:      db 0F0h
+playerY:        dw 10
+cpuY:           dw 10
+ballX:          dw 66
+ballY:          dw 7
+ballVelX:       db -2
+ballVelY:       db 1
+playerScore:    db 0
+cpuScore:       db 0
+cpuTimer:       db 0
+cpuDifficulty:  db 1
 
 setup_game:
     mov ax, 0003h                           ; AL = 03H text mode 80x25 characters, 16 color VGA
@@ -61,12 +69,19 @@ game_loop:
         add di, ROWLEN
         add bx, ROWLEN
         loop .draw_player_loop
-
-    ;; Draw Ball
-    imul di, [ballY], ROWLEN
-    add di, [ballX]
-    mov word [es:di], 2000h
     
+    ;; Draw Scores
+    mov di, ROWLEN+66
+    mov bh, 0Eh
+    mov bl, [playerScore]
+    add bl, 30h                             ; To get the ASCII value of the digit
+    mov [es:di], bx
+
+    add di, 24
+    mov bl, [cpuScore]
+    add bl, 30h
+    mov [es:di], bx         
+
     ;; Get Player Input
     mov ah, 1                               ; BIOS get keyboard status int 16h AH 01h
     int 16h
@@ -112,12 +127,23 @@ game_loop:
 
     ;; Move CPU
     move_cpu_up:
+        ;; CPU difficulty: Only move cpu paddle every cpuDifficutly # of game loop cycles
+        mov bl, [cpuDifficulty]
+        cmp [cpuTimer], bl
+        jl inc_cpu_timer
+        mov byte [cpuTimer], 0
+        jmp move_ball
+
+        inc_cpu_timer:
+            inc byte [cpuTimer]
+
         mov bx, [cpuY]
         cmp bx, [ballY]
         jl move_cpu_down
         dec word [cpuY]
-        jnz move_ball
+        jge move_ball
         inc word [cpuY]
+        jmp move_ball
 
     move_cpu_down:
         add bx, PADDLEHEIGHT
@@ -144,7 +170,7 @@ game_loop:
 
     ;; Check collision
     check_hit_top:
-        cmp word [ballX], 0
+        cmp word [ballY], 0
         jg check_hit_bottom
         neg byte [ballVelY]
         jmp end_collision_checks
@@ -171,19 +197,45 @@ game_loop:
 
     check_hit_cpu:
         cmp word [ballX], CPUX
-        jne end_collision_checks
+        jne check_hit_left
         mov bx, [cpuY]
         cmp bx, [ballY]
-        jg end_collision_checks
+        jg check_hit_left
 
         add bx, PADDLEHEIGHT
         cmp bx, [ballY]
-        jl end_collision_checks     ;; see if should be jle
+        jl check_hit_left     ;; see if should be jle
 
         neg byte [ballVelX]
 
+    check_hit_left:
+        cmp word [ballX], 0
+        jg check_hit_right
+        inc byte [cpuScore]
+        mov word [ballX], PLAYERBALLSTARTX
+        jmp reset_ball
+
+    check_hit_right:
+        cmp word [ballX], ROWLEN
+        jl end_collision_checks
+        inc byte [playerScore]
+        mov word [ballX], CPUBALLSTARTX
     
+    reset_ball:
+        mov word [ballY], BALLSTARTY
+        cmp byte [cpuScore], WINCOND
+        je game_over
+        cmp byte [playerScore], WINCOND
+        je game_over
+
+        ;; Check/Change cpu difficulty for every player point scored
+        mov cl, [playerScore]
+        jcxz end_collision_checks
+        imul cx, 10
+        mov [cpuDifficulty], cl
+
     end_collision_checks:
+
     ;; Delay loop
     mov bx, [046Ch]
     inc bx
@@ -196,6 +248,20 @@ game_loop:
 jmp game_loop
 
 ;; Win/Lose condition
+game_over:
+    cmp byte [playerScore], WINCOND
+    je game_won
+    jmp game_lost
+
+game_won:
+    mov dword [es:0000], 0F490F57h          ; WI
+    mov dword [es:0004], 0F210F4Eh          ; N!
+    ; hlt
+
+game_lost:
+    mov dword [es:0000], 0F4F0F4Ch          ; LO
+    mov dword [es:0004], 0F450F53h          ; SE
+    hlt
 
 times 510 -($-$$) db 0                      ; Bootsector padding
 dw 0AA55h                                   ; Bootsector Signature

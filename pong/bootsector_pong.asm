@@ -38,6 +38,11 @@ setup_game:
     mov ax, 0003h                           ; AL = 03H text mode 80x25 characters, 16 color VGA
     int 10h
 
+    ;; Hide Cursor
+    inc ah
+    mov ch, SCREENH
+    int 10h                                 ; int 10h AH 01h set cursor shape; CH is starting line, CL is ending line
+
     ;; Set up video memory
     mov ax, VIDMEM
     mov es, ax
@@ -59,7 +64,7 @@ game_loop:
         add di, 2*ROWLEN - 2                ; Only drawing every other row, subtracting 2 to because loop increments
         loop .draw_middle_loop
 
-    ;; Draw Player Paddles
+    ;; Draw Player and CPU Paddles
     imul di, [playerY], ROWLEN              ; Y position is Y (# of rows) * length or row
     imul bx, [cpuY], ROWLEN
     mov cl, PADDLEHEIGHT
@@ -71,35 +76,57 @@ game_loop:
         loop .draw_player_loop
     
     ;; Draw Scores
+    mov ah, 0E0h
+    mov cl, [playerScore]
+    jcxz draw_cpu_score
     mov di, ROWLEN+66
-    mov bh, 0Eh
-    mov bl, [playerScore]
-    add bl, 30h                             ; To get the ASCII value of the digit
-    mov [es:di], bx
+    .playerScore_loop:
+        stosw
+        sub di, 6
+        loop .playerScore_loop
 
-    add di, 24
-    mov bl, [cpuScore]
-    add bl, 30h
-    mov [es:di], bx         
+    draw_cpu_score:
+        mov cl, [cpuScore]
+        jcxz get_player_input
+        mov di, ROWLEN+90
+        .cpuScoreloop:
+            stosw
+            inc di
+            inc di
+            loop .cpuScoreloop
+
+    ;; Draw Scores is Digits
+    ; mov di, ROWLEN+66
+    ; mov bh, 0Eh
+    ; mov bl, [playerScore]
+    ; add bl, 30h                             ; To get the ASCII value of the digit
+    ; mov [es:di], bx
+
+    ; add di, 24
+    ; mov bl, [cpuScore]
+    ; add bl, 30h
+    ; mov [es:di], bx         
+
 
     ;; Get Player Input
-    mov ah, 1                               ; BIOS get keyboard status int 16h AH 01h
-    int 16h
-    jz move_cpu_up
+    get_player_input:
+        mov ah, 1                               ; BIOS get keyboard status int 16h AH 01h
+        int 16h
+        jz move_cpu_up
 
-    cbw                                     ; zero out AH if AL < 128 (single byte instruction)
-    int 16h                                 ; Get keystroke in AX; AH = scancode; AL = ASCII value
+        cbw                                     ; zero out AH if AL < 128 (single byte instruction)
+        int 16h                                 ; Get keystroke in AX; AH = scancode; AL = ASCII value
 
-    cmp ah, KEY_W
-    je w_pressed
-    cmp ah, KEY_S
-    je s_pressed
-    cmp ah, KEY_C
-    je c_pressed
-    cmp ah, KEY_R
-    je r_pressed
+        cmp ah, KEY_W
+        je w_pressed
+        cmp ah, KEY_S
+        je s_pressed
+        cmp ah, KEY_C
+        je c_pressed
+        cmp ah, KEY_R
+        je r_pressed
 
-    jmp move_cpu_up                         ; user pressed some other key, we'll ignore and move on
+        jmp move_cpu_up                         ; user pressed some other key, we'll ignore and move on
 
 
     ;; Move Player Paddle
@@ -115,15 +142,13 @@ game_loop:
         inc word [playerY]                  ; Move down by 1 row
         jmp move_cpu_up
 
-    c_pressed:
-        ;; Change color of the Middle line and Paddles
-        add byte [drawColor], 10h           ; Move to next VGA color
-        jmp move_cpu_up
-
     r_pressed:
         ;; reset
         int 19h
 
+    c_pressed:
+        ;; Change color of the Middle line and Paddles
+        add byte [drawColor], 10h           ; Move to next VGA color
 
     ;; Move CPU
     move_cpu_up:
@@ -149,11 +174,9 @@ game_loop:
         add bx, PADDLEHEIGHT
         cmp bx, [ballY]
         jg move_ball
+        cmp bx, SCREENH-1
+        je move_ball
         inc word [cpuY]
-        cmp word [cpuY], SCREENH
-        jl move_ball
-        dec word [cpuY]
-
 
     ;; Move Ball
     move_ball:
@@ -170,16 +193,13 @@ game_loop:
 
     ;; Check collision
     check_hit_top:
-        cmp word [ballY], 0
-        jg check_hit_bottom
-        neg byte [ballVelY]
-        jmp end_collision_checks
+        mov cx, [ballY]
+        jcxz reverse_ball_Y
+        cmp cx, SCREENH-1
+        jne check_hit_player
 
-    check_hit_bottom:
-        cmp word [ballY], SCREENH - 1
-        jl check_hit_player
+    reverse_ball_Y:
         neg byte [ballVelY]
-        jmp end_collision_checks
 
     check_hit_player:
         cmp word [ballX], PLAYERX
@@ -192,8 +212,7 @@ game_loop:
         cmp bx, [ballY]
         jl check_hit_cpu            ;; see if it should be jle
 
-        neg byte [ballVelX]
-        jmp end_collision_checks
+        jmp reverse_ball_X
 
     check_hit_cpu:
         cmp word [ballX], CPUX
@@ -205,41 +224,54 @@ game_loop:
         add bx, PADDLEHEIGHT
         cmp bx, [ballY]
         jl check_hit_left     ;; see if should be jle
-
+    
+    reverse_ball_X:
         neg byte [ballVelX]
 
     check_hit_left:
         cmp word [ballX], 0
         jg check_hit_right
         inc byte [cpuScore]
-        mov word [ballX], PLAYERBALLSTARTX
+        mov bx, PLAYERBALLSTARTX
         jmp reset_ball
 
     check_hit_right:
         cmp word [ballX], ROWLEN
         jl end_collision_checks
         inc byte [playerScore]
-        mov word [ballX], CPUBALLSTARTX
+        mov bx, CPUBALLSTARTX
     
     reset_ball:
-        mov word [ballY], BALLSTARTY
         cmp byte [cpuScore], WINCOND
-        je game_over
+        je game_lost
         cmp byte [playerScore], WINCOND
-        je game_over
+        je game_won
 
         ;; Check/Change cpu difficulty for every player point scored
-        mov cl, [playerScore]
-        jcxz end_collision_checks
-        imul cx, 10
+        imul cx, [playerScore], 10
+        jcxz reset_ball_2
         mov [cpuDifficulty], cl
+
+        ;; Randomize ball start X position a bit for variety
+        cbw
+        int 1Ah
+        mov ax, dx
+        xor dx, dx
+        mov cx, 10
+        div cx
+        shl dx, 1
+        add bx, dx
+    
+    reset_ball_2:
+        mov [ballX], bx
+        mov word [ballY], BALLSTARTY
 
     end_collision_checks:
 
     ;; Delay loop
     mov bx, [046Ch]
     inc bx
-    inc bx
+    ; inc bx
     .delay:
         cmp [046Ch], bx
         jl .delay
@@ -248,15 +280,16 @@ game_loop:
 jmp game_loop
 
 ;; Win/Lose condition
-game_over:
-    cmp byte [playerScore], WINCOND
-    je game_won
-    jmp game_lost
+; game_over:
+;     cmp byte [playerScore], WINCOND
+;     je game_won
+;     jmp game_lost
 
 game_won:
     mov dword [es:0000], 0F490F57h          ; WI
     mov dword [es:0004], 0F210F4Eh          ; N!
-    ; hlt
+    cli
+    hlt
 
 game_lost:
     mov dword [es:0000], 0F4F0F4Ch          ; LO
